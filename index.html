@@ -20,8 +20,15 @@
     <link
       href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Nanum+Pen+Script&family=Noto+Sans+KR:wght@400;500;600;700&family=Noto+Serif+KR:wght@500;600;700&display=swap"
       rel="stylesheet"
+      media="print"
+      onload="this.media='all'"
     />
-    <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.2/dist/jspdf.umd.min.js"></script>
+    <noscript>
+      <link
+        href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Nanum+Pen+Script&family=Noto+Sans+KR:wght@400;500;600;700&family=Noto+Serif+KR:wght@500;600;700&display=swap"
+        rel="stylesheet"
+      />
+    </noscript>
     <style>
       :root {
         --font-sans: "Noto Sans KR", -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", sans-serif;
@@ -1338,7 +1345,16 @@
     </style>
   </head>
   <body>
-    <div id="root" class="app-shell"></div>
+    <div id="root" class="app-shell">
+      <div style="max-width:1024px;margin:0 auto;padding:80px 16px;text-align:center;font-size:14px;color:#71717a;">
+        앨범을 준비하고 있습니다...
+      </div>
+    </div>
+    <noscript>
+      <div style="max-width:640px;margin:40px auto;padding:20px;background:#fff;border:1px solid #e4e4e7;border-radius:8px;text-align:center;font-size:14px;color:#18181b;">
+        이 사진 앨범 앱을 사용하려면 브라우저에서 JavaScript를 활성화해 주세요.
+      </div>
+    </noscript>
 
     <script>
       (function () {
@@ -1483,6 +1499,14 @@
           }, 3600);
         }
 
+        function sanitizeSettings(raw) {
+          var s = Object.assign(defaultSettings(), raw && typeof raw === 'object' ? raw : {});
+          if (!THEMES[s.theme]) s.theme = 'white';
+          if (!FONTS[s.font]) s.font = 'serif';
+          if (s.orientation !== 'landscape' && s.orientation !== 'portrait') s.orientation = 'landscape';
+          return s;
+        }
+
         /* IndexedDB Helpers */
         function openDB() {
           return new Promise(function (resolve, reject) {
@@ -1490,18 +1514,23 @@
               reject(new Error('IndexedDB unavailable'));
               return;
             }
-            var req = indexedDB.open(DB_NAME, DB_VERSION);
-            req.onupgradeneeded = function () {
-              var db = req.result;
-              if (!db.objectStoreNames.contains(STORE_PHOTOS)) {
-                db.createObjectStore(STORE_PHOTOS, { keyPath: 'id' });
-              }
-              if (!db.objectStoreNames.contains(STORE_META)) {
-                db.createObjectStore(STORE_META, { keyPath: 'key' });
-              }
-            };
-            req.onsuccess = function () { resolve(req.result); };
-            req.onerror = function () { reject(req.error); };
+            try {
+              var req = indexedDB.open(DB_NAME, DB_VERSION);
+              req.onupgradeneeded = function () {
+                var db = req.result;
+                if (!db.objectStoreNames.contains(STORE_PHOTOS)) {
+                  db.createObjectStore(STORE_PHOTOS, { keyPath: 'id' });
+                }
+                if (!db.objectStoreNames.contains(STORE_META)) {
+                  db.createObjectStore(STORE_META, { keyPath: 'key' });
+                }
+              };
+              req.onsuccess = function () { resolve(req.result); };
+              req.onerror = function () { reject(req.error || new Error('IndexedDB error')); };
+              req.onblocked = function () { reject(new Error('IndexedDB blocked')); };
+            } catch (err) {
+              reject(err);
+            }
           });
         }
 
@@ -1528,49 +1557,68 @@
                 });
               });
               metaStore.put({ key: 'settings', value: state.settings });
-              tx.oncomplete = function () { db.close(); };
-              tx.onerror = function () { db.close(); };
+              tx.oncomplete = function () { try { db.close(); } catch (e) {} };
+              tx.onerror = function () { try { db.close(); } catch (e) {} };
             }).catch(function () {});
           }, 300);
         }
 
         function loadFromDB() {
-          return openDB().then(function (db) {
+          var fallback = { photos: [], settings: defaultSettings() };
+          var dbLoadPromise = openDB().then(function (db) {
             return new Promise(function (resolve) {
-              var tx = db.transaction([STORE_PHOTOS, STORE_META], 'readonly');
-              var pReq = tx.objectStore(STORE_PHOTOS).getAll();
-              var mReq = tx.objectStore(STORE_META).get('settings');
-              tx.oncomplete = function () {
-                db.close();
-                var recs = pReq.result || [];
-                recs.sort(function (a, b) { return a.order - b.order; });
-                var photos = recs.map(function (r) {
-                  return {
-                    id: r.id,
-                    blob: r.blob,
-                    previewUrl: URL.createObjectURL(r.blob),
-                    fileName: r.fileName,
-                    width: r.width,
-                    height: r.height,
-                    title: r.title || '',
-                    description: r.description || '',
-                    createdAt: r.createdAt || Date.now()
-                  };
-                });
-                var saved = mReq.result && mReq.result.value ? mReq.result.value : {};
-                resolve({
-                  photos: photos,
-                  settings: Object.assign(defaultSettings(), saved)
-                });
-              };
-              tx.onerror = function () {
-                db.close();
-                resolve({ photos: [], settings: defaultSettings() });
-              };
+              try {
+                var tx = db.transaction([STORE_PHOTOS, STORE_META], 'readonly');
+                var pReq = tx.objectStore(STORE_PHOTOS).getAll();
+                var mReq = tx.objectStore(STORE_META).get('settings');
+                tx.oncomplete = function () {
+                  try { db.close(); } catch (e) {}
+                  try {
+                    var recs = Array.isArray(pReq.result) ? pReq.result : [];
+                    recs.sort(function (a, b) { return (a.order || 0) - (b.order || 0); });
+                    var photos = [];
+                    for (var i = 0; i < recs.length; i++) {
+                      var r = recs[i];
+                      if (!r || !r.blob || !(r.blob instanceof Blob)) continue;
+                      photos.push({
+                        id: r.id || String(i),
+                        blob: r.blob,
+                        previewUrl: URL.createObjectURL(r.blob),
+                        fileName: r.fileName || 'photo',
+                        width: r.width || 1600,
+                        height: r.height || 1200,
+                        title: r.title || '',
+                        description: r.description || '',
+                        createdAt: r.createdAt || Date.now()
+                      });
+                    }
+                    var saved = mReq.result && mReq.result.value ? mReq.result.value : {};
+                    resolve({
+                      photos: photos,
+                      settings: sanitizeSettings(saved)
+                    });
+                  } catch (err) {
+                    resolve(fallback);
+                  }
+                };
+                tx.onerror = function () {
+                  try { db.close(); } catch (e) {}
+                  resolve(fallback);
+                };
+              } catch (err) {
+                try { db.close(); } catch (e) {}
+                resolve(fallback);
+              }
             });
           }).catch(function () {
-            return { photos: [], settings: defaultSettings() };
+            return fallback;
           });
+
+          var timeoutPromise = new Promise(function (resolve) {
+            setTimeout(function () { resolve(fallback); }, 1000);
+          });
+
+          return Promise.race([dbLoadPromise, timeoutPromise]);
         }
 
         function clearDB() {
@@ -1710,10 +1758,27 @@
         /* Canvas Export Helpers (Shared by PDF & PNG) */
         function loadScript(src) {
           return new Promise(function (resolve, reject) {
+            var settled = false;
             var s = document.createElement('script');
+            var timer = setTimeout(function () {
+              if (settled) return;
+              settled = true;
+              reject(new Error('Script load timeout'));
+            }, 12000);
             s.src = src;
-            s.onload = resolve;
-            s.onerror = reject;
+            s.async = true;
+            s.onload = function () {
+              if (settled) return;
+              settled = true;
+              clearTimeout(timer);
+              resolve();
+            };
+            s.onerror = function () {
+              if (settled) return;
+              settled = true;
+              clearTimeout(timer);
+              reject(new Error('Script load error'));
+            };
             document.head.appendChild(s);
           });
         }
@@ -1722,6 +1787,7 @@
           if (window.jspdf && window.jspdf.jsPDF) return window.jspdf.jsPDF;
           if (window.jsPDF) return window.jsPDF;
           var fallbacks = [
+            'https://cdn.jsdelivr.net/npm/jspdf@2.5.2/dist/jspdf.umd.min.js',
             'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.2/jspdf.umd.min.js',
             'https://unpkg.com/jspdf@2.5.2/dist/jspdf.umd.min.js'
           ];
@@ -2575,6 +2641,11 @@
         function renderPhotoPage(mainEl) {
           var photoIdx = state.currentPage - 1;
           var photo = state.photos[photoIdx];
+          if (!photo) {
+            state.currentPage = 0;
+            renderCoverPage(mainEl);
+            return;
+          }
           var totalCount = state.photos.length;
           var pageLabel = String(photoIdx + 1).padStart(2, '0') + ' / ' + String(totalCount).padStart(2, '0');
           var orient = state.settings.orientation;
@@ -2965,12 +3036,24 @@
         }
 
         function render() {
-          renderTopBar();
-          renderControlsBar();
-          renderMain();
-          renderModal();
-          renderDragOverlay();
-          renderToast();
+          try {
+            renderTopBar();
+            renderControlsBar();
+            renderMain();
+            renderModal();
+            renderDragOverlay();
+            renderToast();
+          } catch (err) {
+            var mainEl = document.getElementById('main-root') || document.getElementById('root');
+            if (mainEl) {
+              mainEl.innerHTML =
+                '<div style="max-width:560px;margin:64px auto;padding:24px;background:#fff;border:1px solid #e4e4e7;border-radius:10px;text-align:center;">' +
+                  '<p style="font-size:16px;font-weight:600;color:#18181b;margin:0 0 8px;">화면을 불러오는 중 문제가 발생했습니다</p>' +
+                  '<p style="font-size:13px;color:#71717a;margin:0 0 16px;">새로고침하거나 아래 버튼을 눌러 다시 시도해 주세요.</p>' +
+                  '<button type="button" onclick="location.reload()" style="height:38px;padding:0 16px;border-radius:8px;background:#18181b;color:#fff;font-size:13px;font-weight:500;">새로고침</button>' +
+                '</div>';
+            }
+          }
         }
 
         /* Global Listeners */
@@ -3033,12 +3116,17 @@
 
         /* Boot */
         render();
-        loadFromDB().then(function (data) {
-          state.photos = data.photos;
-          state.settings = data.settings;
-          state.isHydrated = true;
-          render();
-        });
+        loadFromDB()
+          .then(function (data) {
+            state.photos = data.photos || [];
+            state.settings = data.settings || defaultSettings();
+            state.isHydrated = true;
+            render();
+          })
+          .catch(function () {
+            state.isHydrated = true;
+            render();
+          });
       })();
     </script>
   </body>
